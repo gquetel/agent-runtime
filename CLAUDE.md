@@ -254,11 +254,13 @@ item at creation time. Use this rubric:
 
 **Validation comment** (`comment_html`, written after validation, optimized for
 independent manual review by the operator):
-- The self-contained reproduction, attached as a file. Always privilege a  **`runNixOSTest` `.nix`** approach, 
-  if you don't manage to build the PoC using Nix, instead provide the Docker command. 
+- The self-contained reproduction, inlined into the comment as a fenced code
+  block (`<pre><code>…</code></pre>`), not a file attachment — Plane's API has
+  no simple upload and everything the operator needs is text. Always privilege a
+  **`runNixOSTest` `.nix`** approach; if you can't build the PoC using Nix,
+  provide the Docker command instead.
 - PoC steps written so they can be reproduced without context
-- Attach PoC scripts in the work item if True Positive
-- Raw output / proof of exploitation
+- Raw output / proof of exploitation, inlined as a `<pre><code>` block
 - True Positive or False Positive verdict with reasoning
 
 The operator will manually verify True Positives before any further action.
@@ -282,8 +284,9 @@ validation; only dynamic exploitation against a running target is.
 3. Execute the PoC against the live instance.
 4. Capture raw output as evidence.
 5. Tear the environment down.
-6. Update Plane and record the outcome as a comment, attaching the reproduction
-   (the `.nix` expression, or the Docker approach) as a file.
+6. Update Plane and record the outcome as a comment, inlining the reproduction
+   (the `.nix` expression, or the Docker approach) as a `<pre><code>` block in
+   `comment_html`.
 
 ---
 
