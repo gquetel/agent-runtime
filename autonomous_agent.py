@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""Autonomous vulnerability-research agent: orchestration CLI.
+"""Autonomous agent runtime: orchestration CLI.
 
-  vuln-agent run [options]         Run the Operating Loop for one systemd-
-                                    managed session (a "nightly" or "manual"
-                                    instance of vuln-agent@<mode>.service in
-                                    nixconfigs). Each iteration is one pass of
-                                    the loop defined in CLAUDE.md; the loop
-                                    continues until a stop condition is hit:
-                                    the configured cutoff, a usage-limit
-                                    signal from the stream, or SIGTERM/SIGINT.
+Task-agnostic driver. The task itself lives in a *profile*
+(`profiles/<name>/CLAUDE.md`, plus an optional `profiles/<name>/prompt`);
+`run` selects one, installs its CLAUDE.md into the work dir, and drives Claude
+Code through it. Plane is the agent's memory in every profile.
 
-  vuln-agent metrics <status.json> <output.prom>
+  autonomous-agent run [options]   Run one systemd-managed session (a "nightly"
+                                    or "manual" instance). Each iteration is one
+                                    pass of the loop defined in the profile's
+                                    CLAUDE.md; the loop continues until a stop
+                                    condition is hit: the configured cutoff, a
+                                    usage-limit signal from the stream, or
+                                    SIGTERM/SIGINT.
+
+  autonomous-agent metrics <status.json> <output.prom>
                                     Convert a status.json snapshot (written by
                                     `run` on every state change) into a
                                     node-exporter textfile-collector metric.
@@ -33,8 +37,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 DEFAULT_PROMPT = (
-    "Read CLAUDE.md. Pull the active work item and its comments from Plane, "
-    "run exactly one iteration of the Operating Loop, then stop."
+    "Read CLAUDE.md and follow it. Resume from your Plane state, run exactly "
+    "one iteration of your operating loop, record progress to Plane, then stop."
 )
 
 # Fixed contracts, not knobs: the executable name never varies, and these
@@ -43,6 +47,11 @@ DEFAULT_PROMPT = (
 CLAUDE_BIN = "claude"
 PROMPT_FILE = Path("/work/state/manual.prompt")
 STATUS_FILE = Path("/work/state/status.json")
+
+# Profiles live alongside this driver in the pinned runtime; CLAUDE.md is
+# copied into the work dir at `run` start so Claude Code reads it from cwd.
+RUNTIME_DIR = Path(__file__).resolve().parent
+CLAUDE_MD_DEST = Path("/work/CLAUDE.md")
 
 # Reactive detection patterns, checked against every streamed line.
 USAGE_LIMIT_PATTERNS = [
@@ -82,6 +91,48 @@ def _hhmm(s: str) -> tuple[int, int]:
 
 
 # --------------------------------------------------------------------------- #
+# profiles
+# --------------------------------------------------------------------------- #
+
+
+def profile_dir(profile: str) -> Path:
+    return RUNTIME_DIR / "profiles" / profile
+
+
+def resolve_profile(profile_file: Path | None, default: str) -> str:
+    """Profile name from `profile_file` (the operator-editable selector) when
+    it holds one, else `default`. A missing, empty, or unreadable file falls
+    back to the default."""
+    if profile_file is not None:
+        try:
+            name = profile_file.read_text().strip()
+        except OSError:
+            name = ""
+        if name:
+            return name
+    return default
+
+
+def install_profile(profile: str) -> None:
+    """Copy the profile's CLAUDE.md into the work dir for Claude Code to read.
+    Raises SystemExit if the profile carries no CLAUDE.md."""
+    src = profile_dir(profile) / "CLAUDE.md"
+    if not src.is_file():
+        raise SystemExit(f"unknown profile {profile!r}: {src} not found")
+    CLAUDE_MD_DEST.write_text(src.read_text())
+
+
+def profile_prompt(profile: str) -> str:
+    """The profile's default resume prompt (`profiles/<p>/prompt`), or the
+    generic DEFAULT_PROMPT when the profile ships none."""
+    try:
+        txt = (profile_dir(profile) / "prompt").read_text().strip()
+    except OSError:
+        txt = ""
+    return txt or DEFAULT_PROMPT
+
+
+# --------------------------------------------------------------------------- #
 # `run`
 # --------------------------------------------------------------------------- #
 
@@ -89,6 +140,7 @@ def _hhmm(s: str) -> tuple[int, int]:
 @dataclass
 class RunConfig:
     mode: str  # "nightly" | "manual"
+    profile: str = "vuln"
     night_start: str = "23:00"
     cutoff: str = "04:00"
     manual_min: int = 60
@@ -173,6 +225,7 @@ class Runner:
         """
         payload = {
             "mode": self.cfg.mode,
+            "profile": self.cfg.profile,
             "state": state,  # "running" | "idle"
             "updated_at": local_now().isoformat(),
             **fields,
@@ -361,7 +414,7 @@ class Runner:
         self.stop_at = self.compute_stop_at()
         started_at = local_now().isoformat()
         stop_at_iso = datetime.fromtimestamp(self.stop_at).astimezone().isoformat()
-        log(f"[shim] mode={self.cfg.mode} stop_at={stop_at_iso}")
+        log(f"[shim] mode={self.cfg.mode} profile={self.cfg.profile} stop_at={stop_at_iso}")
 
         exit_reason = "stopped"  # overwritten on every path out of the loop below
         try:
@@ -422,8 +475,11 @@ def _signal_handler(signum, frame) -> None:
 
 def cmd_run(args: argparse.Namespace) -> int:
     global _active_runner
+    profile = resolve_profile(args.profile_file, args.default_profile)
+    install_profile(profile)
     cfg = RunConfig(
         mode=args.mode,
+        profile=profile,
         night_start=args.night_start,
         cutoff=args.cutoff,
         manual_min=args.manual_min,
@@ -432,6 +488,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         model=args.model,
     )
     _active_runner = Runner(cfg)
+    _active_runner.resume_prompt = profile_prompt(profile)
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
     return _active_runner.main_loop()
@@ -450,7 +507,7 @@ def _escape_label(s: str) -> str:
 def cmd_metrics(args: argparse.Namespace) -> int:
     """Convert a status.json snapshot into a node-exporter textfile metric.
 
-    Run by the host-side `vuln-agent-metrics` timer in nixconfigs, which
+    Run by the host-side `autonomous-agent-metrics` timer in nixconfigs, which
     mounts the guest's shared state dir and has no other visibility into the
     agent's run state.
     """
@@ -463,21 +520,22 @@ def cmd_metrics(args: argparse.Namespace) -> int:
 
     status = json.loads(status_path.read_text())
     mode = _escape_label(str(status.get("mode", "unknown")))
+    profile = _escape_label(str(status.get("profile", "unknown")))
     running = 1 if status.get("state") == "running" else 0
     reason = _escape_label(str(status.get("last_exit_reason") or "none")[:200])
     updated_at = status.get("updated_at")
     age = time.time() - datetime.fromisoformat(updated_at).timestamp() if updated_at else -1
 
     lines = [
-        "# HELP vuln_agent_running Whether the vuln-research agent session is running (1) or idle (0).",
-        "# TYPE vuln_agent_running gauge",
-        f'vuln_agent_running{{mode="{mode}"}} {running}',
-        "# HELP vuln_agent_status_age_seconds Age in seconds of the last status snapshot from the guest.",
-        "# TYPE vuln_agent_status_age_seconds gauge",
-        f"vuln_agent_status_age_seconds {age:.0f}",
-        "# HELP vuln_agent_last_exit_info Last exit reason, as a label; value is always 1.",
-        "# TYPE vuln_agent_last_exit_info gauge",
-        f'vuln_agent_last_exit_info{{reason="{reason}"}} 1',
+        "# HELP autonomous_agent_running Whether the agent session is running (1) or idle (0).",
+        "# TYPE autonomous_agent_running gauge",
+        f'autonomous_agent_running{{mode="{mode}",profile="{profile}"}} {running}',
+        "# HELP autonomous_agent_status_age_seconds Age in seconds of the last status snapshot from the guest.",
+        "# TYPE autonomous_agent_status_age_seconds gauge",
+        f"autonomous_agent_status_age_seconds {age:.0f}",
+        "# HELP autonomous_agent_last_exit_info Last exit reason, as a label; value is always 1.",
+        "# TYPE autonomous_agent_last_exit_info gauge",
+        f'autonomous_agent_last_exit_info{{reason="{reason}"}} 1',
         "",
     ]
 
@@ -494,8 +552,8 @@ def cmd_metrics(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="vuln-agent",
-        description="Autonomous vulnerability-research agent: orchestration CLI.",
+        prog="autonomous-agent",
+        description="Autonomous agent runtime: orchestration CLI.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -505,6 +563,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "--mode", required=True, choices=["nightly", "manual"],
         help="nightly: bound to the night window; manual: bound to --manual-min.",
+    )
+    p_run.add_argument(
+        "--profile-file", type=Path, default=None, metavar="PATH",
+        help="File whose contents name the profile to run; falls back to "
+             "--default-profile when absent or empty.",
+    )
+    p_run.add_argument(
+        "--default-profile", default="vuln", metavar="NAME",
+        help="Profile used when --profile-file is absent/empty (default: %(default)s).",
     )
     p_run.add_argument(
         "--night-start", default="23:00", metavar="HH:MM",
