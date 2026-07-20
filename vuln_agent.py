@@ -37,6 +37,13 @@ DEFAULT_PROMPT = (
     "run exactly one iteration of the Operating Loop, then stop."
 )
 
+# Fixed contracts, not knobs: the executable name never varies, and these
+# paths are the mount-layout convention shared with the guest poller (which
+# writes PROMPT_FILE) and the `metrics` subcommand (which reads STATUS_FILE).
+CLAUDE_BIN = "claude"
+PROMPT_FILE = Path("/work/state/manual.prompt")
+STATUS_FILE = Path("/work/state/status.json")
+
 # Reactive detection patterns, checked against every streamed line.
 USAGE_LIMIT_PATTERNS = [
     re.compile(r"hit your (session|usage) limit", re.I),
@@ -87,11 +94,7 @@ class RunConfig:
     manual_min: int = 60
     wait_server_err: int = 120
     wait_clean: int = 60
-    claude_bin: str = "claude"
     model: str = "sonnet"
-    prompt_file: Path = Path("/work/state/manual.prompt")
-    resume_prompt: str = DEFAULT_PROMPT
-    status_file: Path = Path("/work/state/status.json")
 
 
 class Runner:
@@ -107,7 +110,7 @@ class Runner:
     def __init__(self, cfg: RunConfig):
         self.cfg = cfg
         self.stop_at = 0.0
-        self.resume_prompt = cfg.resume_prompt
+        self.resume_prompt = DEFAULT_PROMPT
         self.child: subprocess.Popen | None = None
         self.stop_requested = False
 
@@ -142,7 +145,7 @@ class Runner:
         Read-only: the guest poller owns this file's lifecycle (writes it
         before starting us; we never write to it)."""
         try:
-            txt = self.cfg.prompt_file.read_text().strip()
+            txt = PROMPT_FILE.read_text().strip()
         except (FileNotFoundError, PermissionError):
             txt = ""
         if txt:
@@ -175,11 +178,11 @@ class Runner:
             **fields,
         }
         try:
-            tmp = self.cfg.status_file.with_suffix(".json.tmp")
+            tmp = STATUS_FILE.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(payload, indent=2))
-            tmp.replace(self.cfg.status_file)  # atomic on the same filesystem
+            tmp.replace(STATUS_FILE)  # atomic on the same filesystem
         except OSError as exc:
-            log(f"[status] failed to write {self.cfg.status_file}: {exc!r}")
+            log(f"[status] failed to write {STATUS_FILE}: {exc!r}")
 
     # --- docker cleanup between iterations ---------------------------------- #
     # (belt-and-suspenders; CLAUDE.md also prunes)
@@ -253,7 +256,7 @@ class Runner:
         The iteration is killed at stop_at, so no message is sent past it.
         """
         cmd = [
-            self.cfg.claude_bin, "--print",
+            CLAUDE_BIN, "--print",
             "--model", self.cfg.model,
             "--dangerously-skip-permissions",
             "--output-format", "stream-json",
@@ -426,11 +429,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         manual_min=args.manual_min,
         wait_server_err=args.wait_server_err,
         wait_clean=args.wait_clean,
-        claude_bin=args.claude_bin,
         model=args.model,
-        prompt_file=args.prompt_file,
-        resume_prompt=args.resume_prompt,
-        status_file=args.status_file,
     )
     _active_runner = Runner(cfg)
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -528,24 +527,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Delay between iterations otherwise (default: %(default)s).",
     )
     p_run.add_argument(
-        "--claude-bin", default="claude", help="Claude Code executable (default: %(default)s).",
-    )
-    p_run.add_argument(
         "--model", default="sonnet", help="Model to request (default: %(default)s).",
-    )
-    p_run.add_argument(
-        "--prompt-file", type=Path, default=Path("/work/state/manual.prompt"),
-        help="Operator-written resume-prompt for a manual run, read at start "
-             "if present (default: %(default)s).",
-    )
-    p_run.add_argument(
-        "--resume-prompt", default=DEFAULT_PROMPT,
-        help="Prompt to use for nightly runs, or for a manual run whose "
-             "--prompt-file is absent/empty.",
-    )
-    p_run.add_argument(
-        "--status-file", type=Path, default=Path("/work/state/status.json"),
-        help="Where to write the operator-facing status snapshot (default: %(default)s).",
     )
     p_run.set_defaults(func=cmd_run)
 

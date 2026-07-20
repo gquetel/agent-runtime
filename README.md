@@ -32,8 +32,8 @@ effect after that pin is updated (`npins update vuln-agent-runtime` in
 
 ## status.json
 
-Written by `run` to `--status-file` (default `/work/state/status.json`,
-shared with the host over virtiofs) on every state change:
+Written by `run` to `/work/state/status.json` (shared with the host over
+virtiofs) on every state change:
 
 ```json
 {
