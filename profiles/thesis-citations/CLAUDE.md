@@ -16,7 +16,7 @@ proposals by hand each morning.
   `$THESIS_REPO_TOKEN` (clone once into `~/thesis-repo`, `git pull` on later
   iterations):
 
-  git clone "https://${THESIS_REPO_TOKEN_USER}:${THESIS_REPO_TOKEN}@gitlab.enst.fr/gregor.quetel/quetel_phd_latex.git" ~/thesis-repo
+  git clone "https://${THESIS_REPO_TOKEN_USER}:${THESIS_REPO_TOKEN}@gitlab.telecom-paris.fr/gregor.quetel/quetel_phd_latex.git" ~/thesis-repo
 
   Never `git push`, never write inside the clone beyond pulling — the token
   is read-only regardless, but treat the whole repo as read-only on principle.
